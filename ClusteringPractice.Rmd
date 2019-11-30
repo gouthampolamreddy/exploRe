@@ -1,0 +1,401 @@
+---
+title: "Thera Bank - Loan Purchase Modeling"
+output:
+  word_document: default
+  pdf_document: default
+  html_notebook: default
+---
+
+Libraries:
+
+This assignment requires various libraries for Data preparation, EDA and model building and Performance evaluation. Mentioned below are being used in the assignment:
+
+```{r}
+
+library(XLConnect)
+
+library(readxl)
+library(corrplot)
+library(cluster)
+require(caTools)
+library(rpart)
+library(rpart.plot)
+library(VIM)
+library(randomForest)
+library(ROCR)
+library(ineq)
+library(InformationValue)
+```
+
+#Environment:
+
+Setting up working director with data to be used:
+
+```{r}
+setwd("C:/Users/Goutham Reddy/Desktop/R files/exploRe")
+```
+
+#Data Reading and Preparation:
+
+```{r}
+# Loading sheet 2 of the excel file
+
+custBankData = readWorksheetFromFile("Thera Bank_Personal_Loan_Modelling-dataset-1.xlsx", sheet = 2, header = TRUE)
+
+# Adjusting the names that aren't convenient for analysis
+
+colnames(custBankData)[c(2,3,4)] = c("age.in.years", "experience.in.years", "income.in.k.month")
+
+head(custBankData)
+
+str(custBankData)
+```
+
+Now, the variable names are suitable to do analysis
+
+
+#Removing the missing values:
+
+```{r}
+#Missing values
+
+colSums(is.na(custBankData))
+
+aggr(custBankData, numbers = TRUE)
+
+# Treating missing values by removing the entire rows
+
+cleanCustBankData = na.omit(custBankData)
+
+```
+
+
+# Correlation Analysis:
+
+Although there is some multi-collinearity, It wouldn't impact Decision tree or Random Forest
+
+```{r}
+#correlation and corrplot
+
+corrCustBankData = cor(cleanCustBankData[-c(1,5),])
+
+
+corrplot(corrCustBankData, method = "number")
+
+```
+
+#Outlier detection:
+
+Below shows outliers in data. For our analysis, considering the data with outliers and decide if these need to be removed. This also evaluates both CART and Random Forest for outlier resistance.
+
+```{r}
+#box plot and outliers
+
+boxplot(cleanCustBankData[,-c(1,5,6,8,10:14)])
+
+outliers = list()
+
+# Number of outliers in each column
+
+for (i in colnames(cleanCustBankData[,-c(1,5,6,8,10:14)])) {
+  
+  outliers[[i]] = length(boxplot.stats(cleanCustBankData[,i])$out)
+  
+}
+
+print(outliers)
+
+```
+
+Summary shows us that there are some values in experience column that are not valid and hence be handled. So, all rows in experience column that has a negative value is replaced with 0.
+
+Also, column ZIP code is removed from analysis as there is no information to geographically map this.
+
+```{r}
+summary(cleanCustBankData)
+
+#Replacing Invalid data with 0s
+
+cleanCustBankData$experience.in.years[cleanCustBankData$experience.in.years < 0] = 0
+
+analyseCustBankData = cleanCustBankData[,-c(1,5)]
+
+```
+
+
+Doing a summary reveals some variable which should be factors are there as Numeric. So making necessary conversions for our analysis.
+
+```{r}
+
+analyseCustBankData$Family.members = as.factor(analyseCustBankData$Family.members)
+analyseCustBankData$Education = as.factor(analyseCustBankData$Education)
+analyseCustBankData$Personal.Loan = as.factor(analyseCustBankData$Personal.Loan)
+analyseCustBankData$Securities.Account =as.factor(analyseCustBankData$Securities.Account)
+analyseCustBankData$CD.Account = as.factor(analyseCustBankData$CD.Account)
+analyseCustBankData$Online = as.factor(analyseCustBankData$Online)
+analyseCustBankData$CreditCard = as.factor(analyseCustBankData$CreditCard)
+
+
+summary(analyseCustBankData)
+
+```
+
+#Clustering:
+
+Here K means cannot be used as the data is mixed. So, using PAM (Partition Around Medoids) algorithm while creating dissimilarity matrix.
+
+```{r}
+#Distance matrix with Gower distance 
+
+disMatrix = daisy(analyseCustBankData, metric = c("gower"))
+
+#Convert to matrix
+disMatrix = as.matrix(disMatrix)
+
+
+```
+
+Applying PAM algorithm and using Silhouette analysis to find optimal clusters:
+
+```{r}
+
+#pamC <- pam(disMatrix, 3)
+#sil = silhouette (pamC$clustering, disMatrix)
+#plot(sil)
+```
+
+# Dataset splitting into test and train:
+
+70:30 split of train and test data
+```{r}
+#splitting the data set into train and test
+
+set.seed(101) 
+sample = sample.split(analyseCustBankData, SplitRatio = .70)
+trainCustBankData = subset(analyseCustBankData, sample == TRUE)
+testCustBankData  = subset(analyseCustBankData, sample == FALSE)
+
+```
+
+Firstly, Building a CART tree and checking the performance of that.
+
+```{r}
+#Decision Tree CART
+
+#summary(trainCustBankData)
+set.seed(101)
+
+
+CTree = rpart(formula = Personal.Loan ~ ., data = trainCustBankData, method = "class", minbucket = 5, cp = 0)
+
+rpart.plot(CTree)
+
+printcp(CTree)
+
+plotcp(CTree)
+
+```
+
+at around CP = 0.009 cross validation error has decreased the least and it is increasing after that. So taking this to prune the tre
+
+```{r}
+prunedTree = prune(CTree, cp = 0.009, "CP")
+
+printcp(prunedTree)
+rpart.plot(prunedTree)
+
+```
+
+Prediction on `train data` with pruned tree
+```{r}
+#Prediction
+
+trainCustBankData$Prediction = predict(prunedTree, trainCustBankData, type = "class")
+trainCustBankData$prob = predict(prunedTree, data = trainCustBankData, type = "prob")
+
+
+confCartTrain = table(trainCustBankData$Personal.Loan, trainCustBankData$Prediction)
+
+errorRateTrain = sum(confCartTrain[1,2]+confCartTrain[2,1])/nrow(trainCustBankData)
+
+print(confCartTrain)
+
+print(errorRateTrain)
+
+```
+
+Error percentage of 11.4% which is quite good model. Now, let's validate this by applying on test data
+
+Prediction on `test data`
+```{r}
+
+
+testCustBankData$Prediction = predict(prunedTree, testCustBankData, type = "class")
+testCustBankData$prob = predict(prunedTree, testCustBankData, type = "prob")
+
+
+confCartTest = table(testCustBankData$Personal.Loan, testCustBankData$Prediction)
+
+errorRateTest = sum(confCartTest[1,2]+confCartTest[2,1])/nrow(trainCustBankData)
+
+print(confCartTest)
+
+print(errorRateTest)
+```
+ It resulted in an error rate of 8.4% which validates our model CART.
+
+#Random Forest
+
+```{r}
+#splitting the data set into train and test for RF
+
+set.seed(1010) 
+sample = sample.split(analyseCustBankData, SplitRatio = .70)
+trainRFCustBankData = subset(analyseCustBankData, sample == TRUE)
+testRFCustBankData  = subset(analyseCustBankData, sample == FALSE)
+
+```
+
+
+Building RF with initial values.
+
+```{r}
+#Random Forest
+
+set.seed(1010)
+custBankDataRF = randomForest(Personal.Loan ~ ., data = trainRFCustBankData, 
+                   ntree=501, mtry = 3, nodesize = 10,
+                   importance=TRUE)
+
+
+print(custBankDataRF)
+```
+
+Plottning Number of trees Vs OOB to estimate optimal no. of trees
+
+```{r}
+
+#Plot trees Vs OOB
+
+plot(custBankDataRF)
+
+print(custBankDataRF$importance)
+```
+
+Tuning the tree with 51 trees and starting with 4 as mtry
+```{r}
+
+
+set.seed(1010)
+custBankDataTunedRF = tuneRF(x = trainRFCustBankData[,-8], 
+              y=trainRFCustBankData$Personal.Loan,
+              mtryStart = 4, 
+              ntreeTry = 51, 
+              stepFactor = 1.5, 
+              improve = 0.0001, 
+              trace=TRUE, 
+              plot = TRUE,
+              doBest = TRUE,
+              nodesize = 10, 
+              importance=TRUE
+)
+```
+
+From the graph we found 6 to be optimal parameters to check while making a branch in Random forest
+```{r}
+#Prediction with Random Forest
+
+trainRFCustBankData$Prediction = predict(custBankDataTunedRF, trainRFCustBankData, type="class")
+trainRFCustBankData$prob1 = predict(custBankDataTunedRF, trainRFCustBankData, type="prob")[,"1"]
+confMatRF=table(trainRFCustBankData$Personal.Loan, trainRFCustBankData$Prediction)
+
+print(confMatRF)
+
+errorRate = (confMatRF[1,2]+confMatRF[2,1])/nrow(trainRFCustBankData)
+print(errorRate)
+
+testRFCustBankData$Prediction = predict(custBankDataTunedRF, testRFCustBankData, type="class")
+testRFCustBankData$prob1 = predict(custBankDataTunedRF, testRFCustBankData, type="prob")[,"1"]
+confTestMatRF=table(testRFCustBankData$Personal.Loan, testRFCustBankData$Prediction)
+
+print(confTestMatRF)
+
+print((confTestMatRF[1,2]+confTestMatRF[2,1])/nrow(testRFCustBankData))
+
+```
+0.6% and 14.4% on train and test data looks promising and Random Forest is proved better that CART model
+
+
+So even if we target top 30 percentile there would be a 40% chance of conversion
+```{r}
+# Probabilities based on quantiles
+
+custQs = quantile(trainRFCustBankData$prob1, prob = seq(0,1,length = 11))
+
+print(custQs)
+```
+
+Performance Evaluation of models CART Vs RandomForest
+
+Making a function to reuse for different model evaluation.
+
+```{r}
+
+PerfMetrics <- function(prob, tar){
+  
+  predObj = prediction(prob, tar)
+  perf = performance(predObj, "tpr", "fpr")
+
+  #ROC Curve  
+  plot(perf)
+
+  #KS 
+  KS = max(perf@y.values[[1]]-perf@x.values[[1]])
+  
+  metrics = list()
+  metrics["KS"] = KS
+  
+
+  #area under the curve
+  auc = performance(predObj,"auc"); 
+  auc = as.numeric(auc@y.values)
+  
+  metrics["auc"] = auc
+
+  #Gini
+  gini = ineq(prob, type="Gini")
+  metrics["gini"] = gini
+
+  #Concordance ratio
+  conc = Concordance(actuals=tar, predictedScores=prob)
+  metrics["conc"] = conc
+  
+  return(metrics)
+
+}
+
+
+
+```
+
+Perfomance for RandomForest
+
+```{r}
+
+rfPerfMets = PerfMetrics(testRFCustBankData$prob1, testRFCustBankData$Personal.Loan)
+
+print(rfPerfMets)
+
+```
+
+
+Performance metrics for CART
+```{r}
+
+rfPerfMets = PerfMetrics(trainRFCustBankData$prob, trainRFCustBankData$Personal.Loan)
+
+print(rfPerfMets)
+
+```
+
+Which makes it to prove Random forest is better.

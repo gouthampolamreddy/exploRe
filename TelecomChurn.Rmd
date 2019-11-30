@@ -1,0 +1,389 @@
+---
+title: "Telecom Customer Churn Prediction"
+author: "Goutham Polamreddy"
+output: 
+  pdf_document: 
+    fig_height: 4
+    fig_width: 4
+    number_sections: yes
+    toc: yes
+    toc_depth: 5
+---
+
+# Environment setup
+
+## Setting up working directory
+
+```{r}
+setwd("C:\\Users\\Goutham Reddy\\Desktop\\R files\\exploRe")
+getwd()
+```
+
+## Loading required libraries
+
+```{r Libraries, echo=TRUE, message=FALSE, warning=FALSE}
+library(readxl)
+library(corrplot)
+library(ggplot2)
+library(Amelia)
+library(mlbench)
+library(rms)
+library(pROC)
+library(e1071)
+library(caTools)
+library(class)
+library(ROCR)
+library(ineq)
+library(InformationValue)
+```
+
+# Exploratory Data Analysis
+
+## Importing data
+
+* Importing data using readxl package
+
+```{r}
+customerChurnData = read_excel("Cellphone.xlsx", sheet = 2)
+
+# copy data frame in case features in original form are required in analysis
+customerChurnDataCopy = customerChurnData
+```
+
+## Summary and Data preparation
+
+* summary shows it is an unbalanced data set, so while evaluation model performance it is recommended to check measures like specificity/Sensitivity.
+
+
+```{r}
+summary(customerChurnData)
+
+```
+
+* Converting appropriate variables to factors help in executing models.
+
+```{r}
+customerChurnData$Churn = as.factor(customerChurnData$Churn)
+customerChurnData$DataPlan = as.factor(customerChurnData$DataPlan)
+customerChurnData$ContractRenewal = as.factor(customerChurnData$ContractRenewal)
+```
+
+## Univariate and Bi-variate analysis
+
+### Univariate Plots and analysis
+
+* Below showing boxplots of continuous variables and their outliers
+
+```{r}
+par(mfrow=c(1,4))
+
+for(i in 5:9) {
+    boxplot(customerChurnData[,i], main=names(customerChurnData)[i])
+}
+
+for(i in 9:11) {
+    boxplot(customerChurnData[,i], main=names(customerChurnData)[i])
+}
+
+```
+
+### Bivariate Plots
+
+* Quite evident from below data usage between users with and without data plan
+
+```{r}
+qplot(customerChurnData$DataPlan, customerChurnData$DataUsage, geom = "boxplot")
+```
+
+* From the plot below, people who opt out relatively uses less data
+
+```{r}
+qplot(customerChurnData$Churn, customerChurnData$DataUsage, geom = "boxplot")
+```
+
+* Other factors like Roaming minutes and Overage fee is similar for both users who opt out and ones who continue
+
+## Multicollinearity check
+
+* Dataplan and data usage for eg are highly correlated, these correlated pairs are tackled while computing the model itself.
+
+```{r}
+churnCorrMatrix = cor(customerChurnData[,-c(1,3,4)])
+
+corrplot(churnCorrMatrix, method = "number")
+
+```
+
+
+## Missing values and outliers
+
+* Clear from below figure that there are no missing values
+
+```{r}
+missmap(customerChurnData, col=c("blue", "red"), legend=FALSE)
+```
+
+# Model Building 
+
+## Logistic regression
+
+```{r}
+
+churnGLM = glm(Churn ~ AccountWeeks+ContractRenewal+DataPlan+DataUsage+CustServCalls+DayMins    +DayCalls+MonthlyCharge+OverageFee+RoamMins, data = customerChurnData, family = "binomial")
+
+summary(churnGLM)
+
+vif(churnGLM)
+
+
+#Variables are inflated let's try to remove some variable and see how it resolves it
+
+churnGLM = glm(Churn ~ AccountWeeks+ContractRenewal+DataPlan+CustServCalls+DayMins    +DayCalls+MonthlyCharge+OverageFee+RoamMins, data = customerChurnData, family = "binomial")
+
+vif(churnGLM)
+
+
+churnGLM = glm(Churn ~ AccountWeeks+ContractRenewal+DataPlan+CustServCalls+
+                 DayMins+DayCalls+OverageFee+RoamMins, data = customerChurnData, family = "binomial")
+
+vif(churnGLM)
+
+qplot(customerChurnData$Churn,churnGLM$fitted.values, geom = "boxplot")
+```
+
+```{r}
+churn.predicted=ifelse(churnGLM$fitted.values<0.15,0,1)
+churnConfMat = table(customerChurnData$Churn,churn.predicted)
+
+print(churnConfMat)
+
+churnErrorRate = (churnConfMat[1,2]+ churnConfMat[2,1])/nrow(customerChurnData)
+
+print(churnErrorRate)
+
+roc(customerChurnData$Churn,churnGLM$fitted.values)
+plot.roc(customerChurnData$Churn,churnGLM$fitted.values)
+
+```
+
+## Implement Naïve Bayes Classifier
+
+```{r}
+
+churnNBM = naiveBayes(Churn ~ AccountWeeks+ContractRenewal+DataPlan+CustServCalls
+                      +DayMins+DayCalls+OverageFee+RoamMins,data=customerChurnData)
+
+print(churnNBM)
+
+churnNBMPredictProb = predict(churnNBM,type="raw",newdata=customerChurnData)
+
+
+qplot(customerChurnData$Churn,churnNBMPredictProb[,2], geom = "boxplot")
+
+#churnNBMPredict = predict(churnNBM,newdata=customerChurnData)
+
+churnNBMPredict = ifelse(churnNBMPredictProb[,2]<0.125,0,1)
+
+nbmConfMat = table(customerChurnData$Churn, churnNBMPredict)
+
+nbmErrorRate = (nbmConfMat[1,2]+nbmConfMat[2,1])/nrow(customerChurnData)
+
+print(nbmConfMat)
+print(nbmErrorRate)
+```
+
+## KNN Classifier
+
+* Since Dataset contains both Continuous and categorical features, converting categorical to numerical by considering each factor as a number.
+
+### Data preparation for kNN
+
+```{r}
+summary(customerChurnDataCopy)
+
+nrow(customerChurnDataCopy)
+
+```
+
+
+### Splitting the data test and train
+
+```{r message=FALSE, warning=FALSE}
+set.seed(101) 
+sample = sample.split(customerChurnDataCopy$Churn, SplitRatio = .70)
+trainCustChurnData = subset(customerChurnDataCopy, sample == TRUE)
+testCustChurnData  = subset(customerChurnDataCopy, sample == FALSE)
+
+nrow(trainCustChurnData)
+nrow(testCustChurnData)
+
+```
+
+### Applying kNN
+
+* since features are in various scales, normalizing them gives better results.
+* Here removing Datausage and Monthly charge, since they were causing other features' variance to inflate
+
+```{r}
+
+churnKNNPred = knn(scale(trainCustChurnData[,-c(1)]), 
+                   scale(testCustChurnData[,-c(1)]), trainCustChurnData$Churn, k=10)
+table(testCustChurnData$Churn, churnKNNPred)
+  
+```
+
+### Finding out the best possible N
+
+* Since sensitivity is important here, choosing k value which yields the best Sensitivity value below
+
+```{r}
+
+for (i in 10:1) {
+
+  churnKNNPred = knn(scale(trainCustChurnData[,-c(1)]), 
+                     scale(testCustChurnData[,-c(1)]), trainCustChurnData$Churn, k=i)
+
+  knnConfMat = table(testCustChurnData$Churn, churnKNNPred)
+
+  sens = knnConfMat[2,2]/(knnConfMat[2,1]+knnConfMat[2,2])
+
+  cat("k=",i,"sensitivity=",sens*100,"%","\n")
+    
+}
+
+```
+
+* From the above output we can see that k=3 has better sensitivity, while k=1, k=2 might be considering noise.
+
+* So making model with k = 3
+
+```{r}
+
+churnKNNPred = knn(scale(trainCustChurnData[,-c(1)]), 
+                   scale(testCustChurnData[,-c(1)]), trainCustChurnData$Churn, k=3)
+
+knnConfMat = table(testCustChurnData$Churn, churnKNNPred)
+```
+
+
+# Evaluation metrics
+
+## Custom Methods for preformance metrics
+
+Making couple of functions to help output some performance metrics by passing 
+
+```{r}
+PerfMetrics <- function(prob, tar, cMatrix){
+  
+  predObj = prediction(prob, tar)
+  perf = performance(predObj, "tpr", "fpr")
+
+  #ROC Curve  
+  plot(perf)
+
+  #KS 
+  KS = max(perf@y.values[[1]]-perf@x.values[[1]])
+  
+  metrics = list()
+  metrics["KS"] = KS
+  
+
+  #area under the curve
+  auc = performance(predObj,"auc"); 
+  auc = as.numeric(auc@y.values)
+  
+  metrics["auc"] = auc
+
+  #Gini
+  gini = ineq(prob, type="Gini")
+  metrics["gini"] = gini
+
+  #Concordance ratio
+  conc = Concordance(actuals=tar, predictedScores=prob)
+  metrics["conc"] = conc
+  
+  #errorRate
+  errorRate = (cMatrix[1,2]+cMatrix[2,1])/length(tar)
+  metrics["errorRate"] = errorRate
+  
+  #Accuracy
+  accuracy = 1 - errorRate
+  metrics["accuracy"] = accuracy
+  
+  #Sensitivity
+  sensitivityValue = cMatrix[2,2]/(cMatrix[2,1]+cMatrix[2,2])
+  metrics["sensitivity"] = sensitivityValue
+  
+  #Specificity
+  specificityValue = cMatrix[1,1]/(cMatrix[1,1]+cMatrix[1,2])
+  metrics["specificity"] = specificityValue
+  
+  return(metrics)
+
+}
+
+confMatMetrics <- function(cMatrix){
+  
+  metrics = list()
+  
+  #errorRate
+  errorRate = (cMatrix[1,2]+cMatrix[2,1])/(cMatrix[1,1]+cMatrix[1,2]+cMatrix[2,1]+cMatrix[2,2])
+  metrics["errorRate"] = errorRate
+  
+  #Accuracy
+  accuracy = 1 - errorRate
+  metrics["accuracy"] = accuracy
+  
+  #Sensitivity
+  sensitivityValue = cMatrix[2,2]/(cMatrix[2,1]+cMatrix[2,2])
+  metrics["sensitivity"] = sensitivityValue
+  
+  #Specificity
+  specificityValue = cMatrix[1,1]/(cMatrix[1,1]+cMatrix[1,2])
+  metrics["specificity"] = specificityValue
+  
+  return(metrics)
+}
+
+```
+
+
+## Logistic Regression
+
+```{r}
+logisticRegression = PerfMetrics(churnGLM$fitted.values, customerChurnData$Churn, churnConfMat)
+print(logisticRegression)
+```
+
+
+
+## Naive Bayes
+
+```{r}
+# Naive Bayes performance metrics
+
+naiveBayesMetrics = PerfMetrics(churnNBMPredictProb[,2], customerChurnData$Churn, nbmConfMat)
+print(naiveBayesMetrics)
+```
+
+## K Nearest Neighbours
+
+```{r}
+
+knnPerfMetrics = confMatMetrics(knnConfMat)
+
+print(knnPerfMetrics)
+
+```
+
+## Comparision
+
+Considering different metrics kNN seems to be the best bet considering an accuracy of 0.888
+
+# Interpretation and Recommendations
+
+Since kNN is found as best for this dataset. Following interpretations and recommendations can be made
+
+* kNN gives predictions by comparing each sample with its nearest neighbours. So by we comparing each customer's behaviour, similar behaviour can be estimated. *Customer profiling can be advantageous*
+
+* Suppose if customers who are levied with roaming charges are chrurning out, then it is possible that a customer who is roaming will likely opt out.

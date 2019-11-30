@@ -1,0 +1,566 @@
+---
+title: "Predicting employee transport mode"
+author: "Goutham Polamreddy"
+date: "17/11/2019"
+output: 
+  pdf_document: 
+    fig_height: 4
+    fig_width: 4
+    number_sections: yes
+    toc: yes
+    toc_depth: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+\newpage
+
+# Environment Preparation
+
+## Setting up working directory
+
+```{r}
+setwd("C://Users//gouth//Desktop//Academia//R files//exploRe")
+getwd()
+
+```
+
+## Load required libraries
+
+```{r message=FALSE, warning=FALSE}
+library(plyr)
+library(corrplot)
+library(nFactors)
+library(psych)
+library(e1071) 
+library(caTools) 
+library(class) 
+library(rms)
+library(pROC)
+library(ROCR) 
+library(ineq) 
+library(InformationValue)
+library(DMwR)
+library(ipred)
+library(rpart)
+library(xgboost)
+```
+
+## Reading data into workspace
+
+```{r}
+transportPrefData = read.csv("Cars_edited.csv")
+
+```
+
+# Exploratory Data Analysis
+
+## Exploring the data
+
+As it turns out, some variables that are supposed to be factors are available as numeric. Let's convert them into factors.
+```{r}
+str(transportPrefData)
+```
+
+Convert columns Engineer, MBA and License into factors
+
+```{r}
+transportPrefData$Engineer = as.factor(transportPrefData$Engineer)
+transportPrefData$MBA = as.factor(transportPrefData$MBA)
+transportPrefData$license = as.factor(transportPrefData$license)
+```
+
+Now, assigning each class in Gender and Transport variables a number to help analyse better
+```{r}
+
+transportPrefData$Gender =  revalue(transportPrefData$Gender, c("Female"=0, "Male"=1))
+
+transportPrefData$Transport = revalue(transportPrefData$Transport,
+                                      c("2Wheeler"=0, "Car"=1, "Public Transport"=0))
+
+summary(transportPrefData)
+
+```
+
+### Removing NA 
+
+It is found that there is a NA in MBA column, let's remove that entry
+
+```{r}
+transportPrefData[is.na(transportPrefData$MBA),]
+transportPrefData = transportPrefData[-145,]
+anyNA(transportPrefData)
+```
+
+### Splitting the data Test & Train
+
+```{r}
+set.seed(123)
+spl = sample.split(transportPrefData$Transport, SplitRatio = 0.7)
+trainTransportPrefData = subset(transportPrefData, spl == T)
+testTransportPrefData = subset(transportPrefData, spl == F)
+```
+
+### Univariate Analysis
+
+Boxplots below shows outliers in data, that need to be treated.
+
+```{r}
+numTransportPrefData = trainTransportPrefData[, sapply(trainTransportPrefData, is.numeric)]
+summary(numTransportPrefData)
+par(mfrow=c(1,4))
+
+for(i in 1:4) {
+    boxplot(numTransportPrefData[,i], main=names(numTransportPrefData)[i])
+}
+```
+
+### Bi-Variate analysis
+
+```{r}
+qplot(transportPrefData$Transport, transportPrefData$Work.Exp, geom = "boxplot")
+qplot(transportPrefData$Transport, transportPrefData$Salary, geom = "boxplot")
+qplot(transportPrefData$Transport, transportPrefData$Age, geom = "boxplot")
+```
+
+As above, more the Age, work experience and salary, more likely to travel by Car
+
+```{r}
+qplot(transportPrefData$Work.Exp, transportPrefData$license, geom = "boxplot")
+qplot(transportPrefData$Work.Exp, transportPrefData$Engineer, geom = "boxplot")
+qplot(transportPrefData$Work.Exp, transportPrefData$MBA, geom = "boxplot")
+```
+
+Also, as seen above, only people with more work experience have Engineering or MBA degrees. People with licence also have more work experience.
+
+## Outlier Detection & Treatment
+
+### Detection
+
+Variables Age, work experience, Salary and Distance has outliers and need to be treated.
+
+Let's consider observations which are outside the range +/- 1.5IQR as outliers
+
+```{r}
+
+outlierDetect <- function(df){
+  
+  for (i in 1:length(df)) {
+    
+    varIQR = IQR(df[,i])
+    LLVar = quantile(df[,i],0.25) - 1.5*varIQR
+    ULVar = quantile(df[,i],0.75) + 1.5*varIQR
+    outliers = subset(df, df[,i] < LLVar | df[,i] > ULVar)
+    print(paste(colnames(df)[i]," Outliers: ", dim(outliers)[1]))
+    
+  }
+  
+}
+
+outlierDetect(numTransportPrefData)
+
+```
+
+### Treatment
+
+```{r}
+#Treating outliers by capping
+
+treatOutliers <- function(df){
+  par(mfrow = c(1,length(df)))
+  for (i in 1:length(df)) {
+    varIQR = IQR(df[,i])
+    LLVar = quantile(df[,i],0.25) - 1.5*varIQR
+    ULVar = quantile(df[,i],0.75) + 1.5*varIQR
+    wOutliers = subset(df, df[,i] >= LLVar & df[,i] <= ULVar)
+    
+    df[,i][df[,i] > max(wOutliers[,i])] = max(wOutliers[,i])
+    boxplot(df[,i],main = colnames(df)[i])
+  }
+  
+  return(df)
+}
+
+numTransportPrefData = treatOutliers(numTransportPrefData)
+
+```
+\newpage
+
+## Multicollinearity
+
+### Correlation plot and detection of Multicollinearity
+
+
+```{r}
+corrTransportPrefData = cor(numTransportPrefData)
+
+corrplot(corrTransportPrefData, method = "number")
+```
+
+From above correlation matrix, Age, Work experience and Salary are highly correlated
+
+### Dimensionality reduction using PCA
+
+```{r}
+ev = eigen(cor(numTransportPrefData)) # get eigenvalues
+ev
+EigenValue=ev$values
+EigenValue
+Factor=c(1,2,3,4)
+Scree=data.frame(Factor,EigenValue)
+plot(Scree,main="Scree Plot", col="Blue",ylim=c(0,4))
+lines(Scree,col="Red")
+```
+
+```{r}
+Unrotate=principal(numTransportPrefData, nfactors=2, rotate="none")
+print(Unrotate,digits=3)
+UnrotatedProfile=plot(Unrotate,row.names(Unrotate$loadings))
+Rotate=principal(numTransportPrefData,nfactors=2,rotate="varimax")
+print(Rotate,digits=3)
+RotatedProfile=plot(Rotate,row.names(Rotate$loadings),cex=1.0)
+numTransportPrefData.Factored = factor.scores(
+  numTransportPrefData,f=Rotate$loadings,  method = "Harman" )
+
+```
+
+First factor(Proficiency factor) explains variables age, work experience and Salary which are highly correlated. Second factor(Distance factor) explains Distance variable alone.
+
+
+### Treating Multicollinearity
+
+we found salary, work experience and Age highly correlated. Let's model logistic regression and resolve multicollinearity using VIF which has been handled in [4.1 Logistic Regresssion](#Logistic regression)
+
+```{r}
+
+boxplot(trainTransportPrefData[,c(1,5,6,7)])
+trainTransportPrefData[,c(1,5,6,7)] = numTransportPrefData
+boxplot(trainTransportPrefData[,c(1,5,6,7)])
+
+```
+
+# Handling Unbalanced data using SMOTE
+
+```{r}
+vehicleCount = table(trainTransportPrefData$Transport)
+carUsagePerc = vehicleCount[2]/vehicleCount[1]
+print(vehicleCount)
+```
+
+There is nearly 16% of people who prefer to travel by Car compared to other means of transport. 
+But for the analysis, this percentage is much less which doesn't help to train the model. So, imputing some more entries for this category using SMOTE technique
+
+```{r}
+set.seed(1000)
+balanced.trainTransportPrefData <- SMOTE(
+  Transport ~.,perc.over = 200, trainTransportPrefData, k = 5, perc.under = 200)
+table(balanced.trainTransportPrefData$Transport)
+```
+
+Now we SMOTEd minority class to have ~ 40% of total observations
+
+# Analysis using models
+
+
+## Logistic regression
+
+Construct Logistic regression with multicollinearity in variables and then treat it taking VIF and variance explainablity of variables
+
+```{r}
+summary(balanced.trainTransportPrefData)
+
+transGLM = glm(Transport ~ .,data =  balanced.trainTransportPrefData, family = "binomial")
+
+summary(transGLM)
+```
+
+Checking the VIF
+
+```{r}
+
+vif(transGLM)
+
+```
+
+As seen above Age, Work experience and salary has high VIF, meaning they inflate the regression coefficients by that much.
+Also, we have seen from the corr matrix that these variables are highly correlated enough to drop two out of three.
+
+```{r}
+transGLM = glm(Transport ~ Gender+Engineer+MBA+Work.Exp+Distance+license,
+               data = balanced.trainTransportPrefData, family = "binomial")
+
+summary(transGLM)
+
+vif(transGLM)
+```
+
+Null deviance is smallest when work experience is considered in the model compared to its other correlated variables. So, considering work experience variable in the model and dropping Salary and age variables.
+
+Also, dropping the variable engineer categorical variable which is not significant.
+
+```{r}
+trainTransportPrefData.final = balanced.trainTransportPrefData[,-c(1,3,6)]
+testTransportPrefData.final = testTransportPrefData[,-c(1,3,6)]
+
+transGLM.final = glm(Transport ~ ., data = trainTransportPrefData.final, family = "binomial")
+summary(transGLM.final)
+```
+
+### Model validation - LR
+
+```{r}
+predLR = predict(transGLM.final, newdata = testTransportPrefData.final, type = 'response')
+
+trans.predictedLR=ifelse(predLR<0.15,0,1)
+lrConfMat = table(testTransportPrefData.final$Transport,trans.predictedLR)
+
+qplot(testTransportPrefData.final$Transport,trans.predictedLR, geom = "boxplot")
+print(lrConfMat)
+
+```
+
+Below, made a couple of custom methods to get metrics and be re-usable for other models
+
+```{r}
+PerfMetrics <- function(prob, tar, cMatrix){
+  
+  predObj = prediction(prob, tar)
+  perf = performance(predObj, "tpr", "fpr")
+
+  #ROC Curve  
+  plot(perf)
+
+  #KS 
+  KS = max(perf@y.values[[1]]-perf@x.values[[1]])
+  
+  metrics = list()
+  metrics["KS"] = KS
+  
+
+  #area under the curve
+  auc = performance(predObj,"auc"); 
+  auc = as.numeric(auc@y.values)
+  
+  metrics["auc"] = auc
+
+  #Gini
+  gini = ineq(prob, type="Gini")
+  metrics["gini"] = gini
+
+  #Concordance ratio
+  conc = Concordance(actuals=tar, predictedScores=prob)
+  metrics["conc"] = conc
+  
+  #errorRate
+  errorRate = (cMatrix[1,2]+cMatrix[2,1])/length(tar)
+  metrics["errorRate"] = errorRate
+  
+  #Accuracy
+  accuracy = 1 - errorRate
+  metrics["accuracy"] = accuracy
+  
+  #Sensitivity
+  sensitivityValue = cMatrix[2,2]/(cMatrix[2,1]+cMatrix[2,2])
+  metrics["sensitivity"] = sensitivityValue
+  
+  #Specificity
+  specificityValue = cMatrix[1,1]/(cMatrix[1,1]+cMatrix[1,2])
+  metrics["specificity"] = specificityValue
+  
+  return(metrics)
+
+}
+
+confMatMetrics <- function(cMatrix){
+  
+  metrics = list()
+  
+  #errorRate
+  errorRate = (cMatrix[1,2]+cMatrix[2,1])/(cMatrix[1,1]+cMatrix[1,2]+cMatrix[2,1]+cMatrix[2,2])
+  metrics["errorRate"] = errorRate
+  
+  #Accuracy
+  accuracy = 1 - errorRate
+  metrics["accuracy"] = accuracy
+  
+  #Sensitivity
+  sensitivityValue = cMatrix[2,2]/(cMatrix[2,1]+cMatrix[2,2])
+  metrics["sensitivity"] = sensitivityValue
+  
+  #Specificity
+  specificityValue = cMatrix[1,1]/(cMatrix[1,1]+cMatrix[1,2])
+  metrics["specificity"] = specificityValue
+  
+  return(metrics)
+}
+
+```
+
+```{r}
+lrCMMetrics = confMatMetrics(lrConfMat)
+lrPerfMetrics = PerfMetrics(predLR, testTransportPrefData.final$Transport, lrConfMat)
+print(lrCMMetrics)
+print(lrPerfMetrics)
+```
+
+## Naïve Bayes Classifier
+
+Using the data after analysing in Logistic regression
+
+* Age and Salary are removed as they are highly correlated with work experience which has been considered in the model
+* Engineer column has been removed because of little significance
+
+```{r}
+transNBM = naiveBayes(Transport ~ .,data=trainTransportPrefData.final)
+
+print(transNBM)
+
+transNBMPredictProb = predict(transNBM,type="raw",newdata=testTransportPrefData.final)
+
+
+qplot(testTransportPrefData.final$Transport,transNBMPredictProb[,2], geom = "boxplot")
+
+```
+
+* From the above boxplot, considering a threshold of 0.125
+
+```{r}
+transNBMPredict = ifelse(transNBMPredictProb[,2]<0.125,0,1)
+
+nbmConfMat = table(testTransportPrefData.final$Transport, transNBMPredict)
+
+nbmErrorRate = (nbmConfMat[1,2]+nbmConfMat[2,1])/nrow(testTransportPrefData.final)
+
+print(nbmConfMat)
+print(nbmErrorRate)
+
+```
+
+Error rate of 9.7% on unbalanced test data can be considered good.
+
+### Model Validation - NB
+
+```{r}
+nbCMMatMetrics = confMatMetrics(nbmConfMat)
+
+nbPerfMetrics = PerfMetrics(transNBMPredictProb[,2], testTransportPrefData.final$Transport, nbmConfMat)
+
+print(nbCMMatMetrics)
+print(nbPerfMetrics)
+```
+
+From the metrics above, it is evident that SMOTEd values are giving good values.
+
+## kNN Classifier
+
+* since features are in various scales, normalizing them gives better results.
+* kNN takes only numeric values, but since we will lose information if we leave them out. So for these reasons we are going to convert categorical to numeric for the purpose of applying the algorithm.
+
+```{r}
+trainTransportPrefData.finalKNN = trainTransportPrefData.final
+testTransportPrefData.finalKNN = testTransportPrefData.final
+
+trainTransportPrefData.finalKNN$Gender = as.numeric(trainTransportPrefData.finalKNN$Gender)
+trainTransportPrefData.finalKNN$MBA = as.numeric(trainTransportPrefData.finalKNN$MBA)
+trainTransportPrefData.finalKNN$license = as.numeric(trainTransportPrefData.finalKNN$license)
+trainTransportPrefData.finalKNN$Transport = as.factor(trainTransportPrefData.finalKNN$Transport)
+
+testTransportPrefData.finalKNN$Gender = as.numeric(testTransportPrefData.finalKNN$Gender)
+testTransportPrefData.finalKNN$MBA = as.numeric(testTransportPrefData.finalKNN$MBA)
+testTransportPrefData.finalKNN$license = as.numeric(testTransportPrefData.finalKNN$license)
+testTransportPrefData.finalKNN$Transport = as.factor(testTransportPrefData.finalKNN$Transport)
+```
+
+
+```{r}
+transKNNPred = knn(scale(trainTransportPrefData.finalKNN[,-6]), 
+                   scale(testTransportPrefData.finalKNN[,-6]),
+                   trainTransportPrefData.finalKNN$Transport, k=10)
+knnConfMat = table(testTransportPrefData.finalKNN$Transport, transKNNPred)
+print(knnConfMat)
+```
+
+### Model Validation - kNN
+
+* Here we chose k as 10 which produced a sensitivity of ~ 95%, so we probably don't need to tune this. 
+* We could have a lesser value for K which will give similar output and reduces computational complexity, but since the number of observations are less, It is fine to choose 10.
+
+```{r}
+knnCMMetrics = confMatMetrics(knnConfMat)
+
+print(knnCMMetrics)
+```
+
+## Model Comparision
+
+* Although similar sensitivity for all 3 models, let's compare other metrics
+* Error rates for LR, NB and KNN are 17.29%, 9.7% and 15.7% respectively.
+* So Naive Bayes has slightly better overall performance. This could be due to the independence of variables taken into consideration(and yes, it is applicable here).
+
+\newpage
+# Bagging
+
+Now, as it is, the model performance is quite good and improving further might not be possible. But let's try to use Bagging and see if we can do it even better. Checking if the overall accuracy can be increased.
+
+```{r}
+transport.bagging <- bagging(Transport ~.,
+data=trainTransportPrefData.final,
+control=rpart.control(maxdepth=5, minsplit=4))
+
+
+testTransportPrefData.final$pred.class <- 
+  predict(transport.bagging, testTransportPrefData.final, type = "prob")
+
+qplot(testTransportPrefData.final$Transport,
+      testTransportPrefData.final$pred.class[,2], geom = "boxplot")
+table(testTransportPrefData.final$Transport,testTransportPrefData.final$pred.class[,2]>0.29)
+```
+
+* From the above at an accuracy of 96%, bagging did improve the overall accuracy. But here sensitivity has gone down to 89% from 94%.
+
+\newpage
+
+# Boosting
+
+```{r}
+transportFeaturesTrain<-as.matrix(trainTransportPrefData.finalKNN[,-6])
+transportLabelTrain<-as.matrix(trainTransportPrefData.finalKNN[,6])
+transportFeaturesTest<-as.matrix(testTransportPrefData.finalKNN[,-6])
+
+summary(trainTransportPrefData.finalKNN)
+xgb.fit <- xgboost(
+  data = transportFeaturesTrain,
+  label = transportLabelTrain,
+  eta = 0.7,
+  max_depth = 5,
+  nrounds = 50,
+  min_child_weight = 3,
+  nfold = 5,
+  objective = "binary:logistic",
+  verbose = 0, 
+  early_stopping_rounds = 10
+)
+
+transportFeaturesTest$xgb.pred.class <- predict(xgb.fit, transportFeaturesTest)
+
+qplot(testTransportPrefData.finalKNN[,6],transportFeaturesTest$xgb.pred.class, geom = "boxplot")
+
+table(testTransportPrefData.finalKNN[,6],transportFeaturesTest$xgb.pred.class>0.49975)
+
+```
+
+* This output is similar to bagging, which already gave good output. Here too an accuracy of 96% is looking good.
+* Here it is not required tune any hyper parameters as it already is a good model.
+
+\newpage
+
+# Conclusions and Insights
+
+* Naive Bayes proved to good when considered Sensitivity at 94%. This could be due to removing multicollinearity which made the variables independant.
+* Work experience, Age and Salary which are highly correlated seems to have much impact on whether they are going to travel by Car.
+* Also, travel is factor that is highly significant as seen in Logistic regression. So, people who live far are more likely to travel by car.
+* One more conclusion is that having license is significant factor in choosing Car as means of transport.
+* Bagging and boosting increased the overall accuracy of the model by atleast 10% considering different models.
+
